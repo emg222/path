@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <omp.h>
 #include "mt19937p.h"
+#include <mpi.h>
 
 //ldoc on
 /**
@@ -38,83 +39,24 @@
  * identical, and false otherwise.
  */
 
-#define NUM_THREADS 4
-#define SQRT_THREADS 2
-#define BLOCK_SIZE 64
-
 int square(int n,               // Number of nodes
            int* restrict l,     // Partial distance at step s
            int* restrict lnew)  // Partial distance at step s+1
 {
-    int tid;
-
     int done = 1;
-    #pragma omp parallel private(tid) shared(l, lnew, n) reduction(&& : done)
-    {
-        int nrows = n / SQRT_THREADS;
-        int nblocks = nrows / BLOCK_SIZE;
-
-        tid = omp_get_thread_num();
-        int col = tid % SQRT_THREADS;
-        int row = tid / SQRT_THREADS;
-        int col_offset = col * nrows;
-        int row_offset = row * nrows;
-
-        for(int T = 0; T < SQRT_THREADS; T++) {
-            for(int I = 0; I < nblocks; ++I) { // block row
-                for(int J = 0; J < nblocks; ++J) { // block column
-                    int C_offset = col_offset + J * BLOCK_SIZE +
-                                   (row_offset + I * BLOCK_SIZE) * n;
-                    for(int K = 0; K < nblocks; ++K) {
-                        int A_offset = T * nrows + K * BLOCK_SIZE + (row_offset + I * BLOCK_SIZE) * n;
-                        int B_offset = col_offset + J * BLOCK_SIZE + (T * nrows + K * BLOCK_SIZE) * n;
-
-                        #pragma unroll
-                        for (int i = 0; i < BLOCK_SIZE; ++i) {
-                            for (int j = 0; j < BLOCK_SIZE; ++j) {
-                                int a = l[A_offset + j + i * n];
-                                for (int k = 0; k < BLOCK_SIZE; ++k) {
-                                    int result = a + l[B_offset + k + j * n];
-
-                                    int result_idx = k + C_offset + i * n;
-                                    int c = lnew[result_idx];
-                                    if(result < c){
-                                        done = 0;
-                                        lnew[result_idx] = result;
-                                    }
-                                }
-                            }
-                        }
-                    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            int lij = lnew[j*n+i];
+            for (int k = 0; k < n; ++k) {
+                int lik = l[k*n+i];
+                int lkj = l[j*n+k];
+                if (lik + lkj < lij) {
+                    lij = lik+lkj;
+                    done = 0;
                 }
             }
+            lnew[j*n+i] = lij;
         }
-
-        int end_row = (row + 1) * nrows;
-        int end_col = (col + 1) * nrows;
-
-        #pragma omp barrier
-
-        for (int j = row_offset; j < end_row; ++j) {
-            for (int i = col_offset; i < end_col; ++i) {
-                l[j*n+i] = lnew[j*n+i];
-            }
-        }
-
-        // for (int j = row_offset; j < end_row; ++j) {
-        //     for (int i = col_offset; i < end_col; ++i) {
-        //         int lij = lnew[j*n+i];
-        //         for (int k = 0; k < n; ++k) {
-        //             int lik = l[k*n+i];
-        //             int lkj = l[j*n+k];
-        //             if (lik + lkj < lij) {
-        //                 lij = lik+lkj;
-        //                 done = 0;
-        //             }
-        //         }
-        //         lnew[j*n+i] = lij;
-        //     }
-        // }
     }
     return done;
 }
@@ -173,6 +115,7 @@ void shortest_paths(int n, int* restrict l)
     memcpy(lnew, l, n*n * sizeof(int));
     for (int done = 0; !done; ) {
         done = square(n, l, lnew);
+        memcpy(l, lnew, n*n * sizeof(int));
     }
     free(lnew);
     deinfinitize(n, l);
@@ -245,6 +188,15 @@ void write_matrix(const char* fname, int n, int* a)
     fclose(fp);
 }
 
+void copy_row_major(const int *l_colmajor, const int n, int *l_rowmajor)
+{
+    
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i)
+            l_rowmajor[i*n+j] = l_colmajor[j * n + ]
+    }
+}
+
 /**
  * # The `main` event
  */
@@ -257,9 +209,13 @@ const char* usage =
     "  - i -- file name where adjacency matrix should be stored (none)\n"
     "  - o -- file name where output matrix should be stored (none)\n";
 
+#define NUM_PROCESSORS 4
+#define SQRT_NUM_PROCESSORS 2
+#define BLOCK_SIZE 50
+
 int main(int argc, char** argv)
 {
-    int n    = 512;            // Number of nodes
+    int n    = 200;            // Number of nodes
     double p = 0.05;           // Edge probability
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
@@ -281,13 +237,84 @@ int main(int argc, char** argv)
     }
 
     // Graph generation + output
-    int* l = gen_graph(n, p);
+    int* l_colmajor0 = gen_graph(n, p);
+
+    // Generate l_{ij}^0 from adjacency matrix representation
+    infinitize(n, l_colmajor0);
+    for (int i = 0; i < n*n; i += n+1)
+            l[i] = 0;
+
+    // Make a row major copy.
+    int* l_rowmajor0 = calloc(int*) calloc(n*n, sizeof(int));
+    copy_row_major(l_colmajor, n, l_rowmajor);
+
+    // Use double buffering
+    // int* l_colmajor1 = (int*) calloc(n*n, sizeof(int));
+    // int* l_rowmajor1 = (int*) calloc(n*n, sizeof(int));
+    // memcpy(l_colmajor1, l_colmajor0, n*n * sizeof(int));
+    // memcpy(l_rowmajor1, l_rowmajor0, n*n * sizeof(int));
+
     if (ifname)
         write_matrix(ifname,  n, l);
 
     // Time the shortest paths code
     double t0 = omp_get_wtime();
-    shortest_paths(n, l);
+    {
+        // Initialize MPI here
+        int tid, nthreads; 
+        MPI_Init(&argc,&argv);
+        MPI_Comm_rank(MPI_COMM_WORLD, &tid); // get thread id
+        MPI_Comm_size(MPI_COMM_WORLD, &nthreads);
+
+        // Malloc for blocks for this thread.
+        int *result    = malloc(BLOCK_SIZE * BLOCK_SIZE * sizeof(int));
+        int *block_row = malloc(BLOCK_SIZE * BLOCK_SIZE * sizeof(int));
+        int *block_col = malloc(BLOCK_SIZE * BLOCK_SIZE * sizeof(int));
+
+        // Initialize things for thread 0 (master)
+        int k;
+        int offset = 0;
+        for(k = 0; k < BLOCK_SIZE; ++k) {
+            memcpy(block_row + offset, l_rowmajor0 + n * k, BLOCK_SIZE * sizeof(int));
+            memcpy(block_col + offset, l_colmajor0 + n * k, BLOCK_SIZE * sizeof(int));
+            offset += BLOCK_SIZE;
+        }
+
+        // Send data out.
+        int i;
+        for(i = 1; i < nthreads; ++i) {
+            int row_idx = i % SQRT_NUM_PROCESSORS;
+            int col_idx = i / SQRT_NUM_PROCESSORS;
+            if(tid == 0) {
+                for(k = 0 ; k < BLOCK_SIZE; ++k) {
+                    MPI_Send()
+                }
+            }
+        }
+
+        // Create new communicators along rows and columns.
+        MPI_Comm rowComm;
+        MPI_Comm_split( MPI_COMM_WORLD, tid / SQRT_NUM_PROCESSORS, tid, &rowComm);
+
+        MPI_Comm colComm;
+        MPI_Comm_split( MPI_COMM_WORLD, tid % SQRT_NUM_PROCESSORS, tid, &colComm);
+
+        // Get id within particular row and column
+        int rowID, colID;
+        MPI_Comm_rank(rowComm, &rowID);
+        MPI_Comm_rank(colComm, &colID);
+
+        for (int done = 0; !done; ) {
+            done = square(n, l, lnew);
+            memcpy(l, lnew, n*n * sizeof(int));
+        }
+
+        // Stop MPI.
+        MPI_Finalize();
+
+        free(lnew);
+        deinfinitize(n, l);
+    }
     double t1 = omp_get_wtime();
 
     printf("== OpenMP with %d threads\n", omp_get_max_threads());

@@ -40,20 +40,19 @@
 
 #define NUM_THREADS 4
 #define SQRT_THREADS 2
-#define BLOCK_SIZE 64
+#define BLOCK_SIZE 50
 
 int square(int n,               // Number of nodes
            int* restrict l,     // Partial distance at step s
            int* restrict lnew)  // Partial distance at step s+1
 {
     int tid;
+    int nrows = n / SQRT_THREADS;
+    int nblocks = nrows / BLOCK_SIZE;
 
     int done = 1;
-    #pragma omp parallel private(tid) shared(l, lnew, n) reduction(&& : done)
+    #pragma omp parallel private(tid) shared(l, lnew) reduction(&& : done)
     {
-        int nrows = n / SQRT_THREADS;
-        int nblocks = nrows / BLOCK_SIZE;
-
         tid = omp_get_thread_num();
         int col = tid % SQRT_THREADS;
         int row = tid / SQRT_THREADS;
@@ -78,9 +77,9 @@ int square(int n,               // Number of nodes
 
                                     int result_idx = k + C_offset + i * n;
                                     int c = lnew[result_idx];
-                                    if(result < c){
-                                        done = 0;
+                                    if(result < c) {
                                         lnew[result_idx] = result;
+                                        done = 0;
                                     }
                                 }
                             }
@@ -90,17 +89,8 @@ int square(int n,               // Number of nodes
             }
         }
 
-        int end_row = (row + 1) * nrows;
-        int end_col = (col + 1) * nrows;
-
-        #pragma omp barrier
-
-        for (int j = row_offset; j < end_row; ++j) {
-            for (int i = col_offset; i < end_col; ++i) {
-                l[j*n+i] = lnew[j*n+i];
-            }
-        }
-
+        // int end_row    = (row + 1) * nrows;
+        // int end_col    = (col + 1) * nrows;
         // for (int j = row_offset; j < end_row; ++j) {
         //     for (int i = col_offset; i < end_col; ++i) {
         //         int lij = lnew[j*n+i];
@@ -173,6 +163,7 @@ void shortest_paths(int n, int* restrict l)
     memcpy(lnew, l, n*n * sizeof(int));
     for (int done = 0; !done; ) {
         done = square(n, l, lnew);
+        memcpy(l, lnew, n*n * sizeof(int));
     }
     free(lnew);
     deinfinitize(n, l);
@@ -259,7 +250,7 @@ const char* usage =
 
 int main(int argc, char** argv)
 {
-    int n    = 512;            // Number of nodes
+    int n    = 400;            // Number of nodes
     double p = 0.05;           // Edge probability
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name

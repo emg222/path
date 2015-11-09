@@ -40,81 +40,39 @@
 
 #define NUM_THREADS 4
 #define SQRT_THREADS 2
-#define BLOCK_SIZE 64
 
 int square(int n,               // Number of nodes
            int* restrict l,     // Partial distance at step s
            int* restrict lnew)  // Partial distance at step s+1
 {
     int tid;
+    int nrows = n / NUM_THREADS;
 
     int done = 1;
-    #pragma omp parallel private(tid) shared(l, lnew, n) reduction(&& : done)
+    #pragma omp parallel private(tid) shared(l, lnew) reduction(&& : done)
     {
-        int nrows = n / SQRT_THREADS;
-        int nblocks = nrows / BLOCK_SIZE;
-
         tid = omp_get_thread_num();
         int col = tid % SQRT_THREADS;
         int row = tid / SQRT_THREADS;
         int col_offset = col * nrows;
+        int end_col    = (col + 1) * nrows;
         int row_offset = row * nrows;
-
-        for(int T = 0; T < SQRT_THREADS; T++) {
-            for(int I = 0; I < nblocks; ++I) { // block row
-                for(int J = 0; J < nblocks; ++J) { // block column
-                    int C_offset = col_offset + J * BLOCK_SIZE +
-                                   (row_offset + I * BLOCK_SIZE) * n;
-                    for(int K = 0; K < nblocks; ++K) {
-                        int A_offset = T * nrows + K * BLOCK_SIZE + (row_offset + I * BLOCK_SIZE) * n;
-                        int B_offset = col_offset + J * BLOCK_SIZE + (T * nrows + K * BLOCK_SIZE) * n;
-
-                        #pragma unroll
-                        for (int i = 0; i < BLOCK_SIZE; ++i) {
-                            for (int j = 0; j < BLOCK_SIZE; ++j) {
-                                int a = l[A_offset + j + i * n];
-                                for (int k = 0; k < BLOCK_SIZE; ++k) {
-                                    int result = a + l[B_offset + k + j * n];
-
-                                    int result_idx = k + C_offset + i * n;
-                                    int c = lnew[result_idx];
-                                    if(result < c){
-                                        done = 0;
-                                        lnew[result_idx] = result;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        int end_row = (row + 1) * nrows;
-        int end_col = (col + 1) * nrows;
-
-        #pragma omp barrier
+        int end_row    = (row + 1) * nrows;
 
         for (int j = row_offset; j < end_row; ++j) {
             for (int i = col_offset; i < end_col; ++i) {
-                l[j*n+i] = lnew[j*n+i];
+                int lij = lnew[j*n+i];
+                for (int k = 0; k < n; ++k) {
+                    int lik = l[k*n+i];
+                    int lkj = l[j*n+k];
+                    if (lik + lkj < lij) {
+                        lij = lik+lkj;
+                        done = 0;
+                    }
+                }
+                lnew[j*n+i] = lij;
             }
         }
-
-        // for (int j = row_offset; j < end_row; ++j) {
-        //     for (int i = col_offset; i < end_col; ++i) {
-        //         int lij = lnew[j*n+i];
-        //         for (int k = 0; k < n; ++k) {
-        //             int lik = l[k*n+i];
-        //             int lkj = l[j*n+k];
-        //             if (lik + lkj < lij) {
-        //                 lij = lik+lkj;
-        //                 done = 0;
-        //             }
-        //         }
-        //         lnew[j*n+i] = lij;
-        //     }
-        // }
     }
     return done;
 }
@@ -173,6 +131,7 @@ void shortest_paths(int n, int* restrict l)
     memcpy(lnew, l, n*n * sizeof(int));
     for (int done = 0; !done; ) {
         done = square(n, l, lnew);
+        memcpy(l, lnew, n*n * sizeof(int));
     }
     free(lnew);
     deinfinitize(n, l);
@@ -196,7 +155,7 @@ int* gen_graph(int n, double p)
     sgenrand(10302011UL, &state);
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i)
-            l[j*n+i] = (genrand(&state) < p);
+            l[i*n+j] = (genrand(&state) < p);
         l[j*n+j] = 0;
     }
     return l;
@@ -259,7 +218,7 @@ const char* usage =
 
 int main(int argc, char** argv)
 {
-    int n    = 512;            // Number of nodes
+    int n    = 200;            // Number of nodes
     double p = 0.05;           // Edge probability
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
