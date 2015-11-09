@@ -200,12 +200,16 @@ const char* usage =
     "  - i -- file name where adjacency matrix should be stored (none)\n"
     "  - o -- file name where output matrix should be stored (none)\n";
 
+#define NUM_THREADS 4
+
 int main(int argc, char** argv)
 {
     int n    = 200;            // Number of nodes
     double p = 0.05;           // Edge probability
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
+
+    omp_set_num_threads(NUM_THREADS);
 
     // Option processing
     extern char* optarg;

@@ -264,6 +264,8 @@ int main(int argc, char** argv)
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
 
+    omp_set_num_threads(NUM_THREADS);
+
     // Option processing
     extern char* optarg;
     const char* optstring = "hn:d:p:o:i:";
