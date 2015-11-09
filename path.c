@@ -78,10 +78,10 @@ int square(int n,               // Number of nodes
 
                                     int result_idx = k + C_offset + i * n;
                                     int c = lnew[result_idx];
-                                    if(result < c){
-                                        done = 0;
-                                        lnew[result_idx] = result;
-                                    }
+                                    int diff = result - c;
+                                    int comparison = diff < 0;
+                                    lnew[result_idx] = c + diff * comparison;
+                                    done = done && !comparison;
                                 }
                             }
                         }
