@@ -192,7 +192,7 @@ int* gen_graph(int n, double p)
     return l;
 }
 
-int* gen_graph(int copySize, int n, double p)
+int* gen_graphCopy(int copySize, int n, double p)
 {
     int* l = (int*) _mm_malloc(copySize*copySize*sizeof(int), 32);
     struct mt19937p state;
@@ -293,21 +293,21 @@ int main(int argc, char** argv)
     int copySize = nBlocks * SQRT_THREADS * BLOCK_SIZE;
 
     // Graph generation + output
-    int* lCopy = gen_graph(copySize, n, p);
-    int* l     = gen_graph(n, n, p);
+    int* lCopy = gen_graphCopy(copySize, n, p);
+    int* l     = gen_graph(n, p);
     if (ifname)
         write_matrix(ifname,  n, l);
 
     // Time the shortest paths code
     double t0 = omp_get_wtime();
-    shortest_paths(n, lCopy);
+    shortest_paths(copySize, lCopy);
     int i, j;
+    double t1 = omp_get_wtime();
     for (j = 0; j < n; ++j) {
         for (i = 0; i < n; ++i) {
             l[j*n+i] = lCopy[j * copySize + i];
         }
     }
-    double t1 = omp_get_wtime();
 
     printf("== OpenMP with %d threads\n", omp_get_max_threads());
     printf("n:     %d\n", n);
@@ -317,9 +317,10 @@ int main(int argc, char** argv)
 
     // Generate output file
     if (ofname)
-        write_matrix(ofname, n, l);
+        write_matrix(ofname, copySize, lCopy);
 
     // Clean up
     _mm_free(l);
+    _mm_free(lCopy);
     return 0;
 }
