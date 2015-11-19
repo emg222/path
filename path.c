@@ -6,9 +6,108 @@
 #include <omp.h>
 #include "mt19937p.h"
 
+//ldoc on
+/**
+ * # The basic recurrence
+ *
+ * At the heart of the method is the following basic recurrence.
+ * If $l_{ij}^s$ represents the length of the shortest path from
+ * $i$ to $j$ that can be attained in at most $2^s$ steps, then
+ * $$
+ *   l_{ij}^{s+1} = \min_k \{ l_{ik}^s + l_{kj}^s \}.
+ * $$
+ * That is, the shortest path of at most $2^{s+1}$ hops that connects
+ * $i$ to $j$ consists of two segments of length at most $2^s$, one
+ * from $i$ to $k$ and one from $k$ to $j$.  Compare this with the
+ * following formula to compute the entries of the square of a
+ * matrix $A$:
+ * $$
+ *   a_{ij}^2 = \sum_k a_{ik} a_{kj}.
+ * $$
+ * These two formulas are identical, save for the niggling detail that
+ * the latter has addition and multiplication where the former has min
+ * and addition.  But the basic pattern is the same, and all the
+ * tricks we learned when discussing matrix multiplication apply -- or
+ * at least, they apply in principle.  I'm actually going to be lazy
+ * in the implementation of `square`, which computes one step of
+ * this basic recurrence.  I'm not trying to do any clever blocking.
+ * You may choose to be more clever in your assignment, but it is not
+ * required.
+ *
+ * The return value for `square` is true if `l` and `lnew` are
+ * identical, and false otherwise.
+ */
+
+#define NUM_THREADS 16
+#define SQRT_THREADS 4
 #define BLOCK_SIZE 64
 
-//ldoc on
+int square(int n,               // Number of nodes
+           int* restrict l,     // Partial distance at step s
+           int* restrict lnew)  // Partial distance at step s+1
+{
+    int tid;
+
+    int done = 1;
+    #pragma omp parallel private(tid) shared(l, lnew, n) reduction(&& : done)
+    {
+        int nrows = n / SQRT_THREADS;
+        int nblocks = nrows / BLOCK_SIZE;
+
+        tid = omp_get_thread_num();
+        int col = tid % SQRT_THREADS;
+        int row = tid / SQRT_THREADS;
+        int col_offset = col * nrows;
+        int row_offset = row * nrows;
+
+        __assume_aligned(l, 32);
+        __assume_aligned(lnew, 32);
+        for(int T = 0; T < SQRT_THREADS; T++) {
+            for(int I = 0; I < nblocks; ++I) { // block row
+                for(int J = 0; J < nblocks; ++J) { // block column
+                    int C_offset = col_offset + J * BLOCK_SIZE +
+                                   (row_offset + I * BLOCK_SIZE) * n;
+                    for(int K = 0; K < nblocks; ++K) {
+                        int A_offset = T * nrows + K * BLOCK_SIZE + (row_offset + I * BLOCK_SIZE) * n;
+                        int B_offset = col_offset + J * BLOCK_SIZE + (T * nrows + K * BLOCK_SIZE) * n;
+
+                        #pragma unroll
+                        for (int i = 0; i < BLOCK_SIZE; ++i) {
+                            #pragma unroll
+                            for (int j = 0; j < BLOCK_SIZE; ++j) {
+                                int a = l[A_offset + j + i * n];
+                                #pragma unroll
+                                for (int k = 0; k < BLOCK_SIZE; ++k) {
+                                    int result = a + l[B_offset + k + j * n];
+
+                                    int result_idx = k + C_offset + i * n;
+                                    int c = lnew[result_idx];
+                                    if(result < c){
+                                        done = 0;
+                                        lnew[result_idx] = result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        int end_row = (row + 1) * nrows;
+        int end_col = (col + 1) * nrows;
+
+        #pragma omp barrier
+
+        for (int j = row_offset; j < end_row; ++j) {
+            for (int i = col_offset; i < end_col; ++i) {
+                l[j*n+i] = lnew[j*n+i];
+            }
+        }
+    }
+    return done;
+}
+
 /**
  *
  * The value $l_{ij}^0$ is almost the same as the $(i,j)$ entry of
@@ -38,32 +137,6 @@ static inline void deinfinitize(int n, int* l)
 }
 
 /**
- * # The basic recurrence
- *
- * At the heart of the method is the following basic recurrence.
- * If $l_{ij}^s$ represents the length of the shortest path from
- * $i$ to $j$ that can be attained in at most $2^s$ steps, then
- * $$
- *   l_{ij}^{s+1} = \min_k \{ l_{ik}^s + l_{kj}^s \}.
- * $$
- * That is, the shortest path of at most $2^{s+1}$ hops that connects
- * $i$ to $j$ consists of two segments of length at most $2^s$, one
- * from $i$ to $k$ and one from $k$ to $j$.  Compare this with the
- * following formula to compute the entries of the square of a
- * matrix $A$:
- * $$
- *   a_{ij}^2 = \sum_k a_{ik} a_{kj}.
- * $$
- * These two formulas are identical, save for the niggling detail that
- * the latter has addition and multiplication where the former has min
- * and addition.  But the basic pattern is the same, and all the
- * tricks we learned when discussing matrix multiplication apply -- or
- * at least, they apply in principle.  I'm actually going to be lazy
- * in the implementation of `square`, which computes one step of
- * this basic recurrence.  I'm not trying to do any clever blocking.
- * You may choose to be more clever in your assignment, but it is not
- * required.
- *
  *
  * Of course, any loop-free path in a graph with $n$ nodes can
  * at most pass theough every node in the graph.  Therefore,
@@ -84,88 +157,13 @@ void shortest_paths(int n, int* restrict l)
     for (int i = 0; i < n*n; i += n+1)
         l[i] = 0;
 
-    int* restrict lnew = (int*) _mm_malloc(n*n*sizeof(int));
-    int num_blocks = n / BLOCK_SIZE;
-
-    // Loop indices -- private variables.
-    int i, j, k, I, J, K, L;
-
-    // blocks used by the kernel.
-    int *A_block;
-    int *B_block;
-    int *C_block;
-
-    int done = 0;
-
-    #pragma omp parallel shared(l, lnew, n, done) private(i, j, k, I, J, K, L, A_block, B_block, C_block)
-    {
-        while(!done) {
-            #pragma omp for schedule(static)
-            for(L = 0; L < num_blocks * num_blocks; ++L) {
-                I = L / num_blocks; // row block number
-                J = L % num_blocks; // column block number
-                int offset = I * BLOCK_SIZE * n + J * BLOCK_SIZE;
-                int *l_block = l + offset;
-                int *lnew_block = lnew + offset;
-                #pragma unroll
-                for(j = 0; j < BLOCK_SIZE; ++j) {
-                    __assume_aligned(l_block, 32);
-                    __assume_aligned(lnew_block, 32);
-                    #pragma unroll
-                    for(i = 0; i < BLOCK_SIZE; ++i) {
-                        lnew_block[i] = l_block[i];
-                    }
-                    l_block    = l_block + n;
-                    lnew_block = lnew_block + n;
-                }
-            }
-
-            #pragma omp barrier
-
-            #pragma omp for schedule(static) reduction(&& : done)
-            for(L = 0; L < num_blocks * num_blocks; ++L) {
-                I = L / num_blocks; // row block number
-                J = L % num_blocks; // column block number
-                C_block = lnew + J * BLOCK_SIZE + I * BLOCK_SIZE * n;
-
-                for(int K = 0; K < num_blocks; ++K) {
-                    A_block = l + K * BLOCK_SIZE + I * BLOCK_SIZE * n;
-                    B_block = l + J * BLOCK_SIZE + K * BLOCK_SIZE * n;
-
-                    #pragma unroll
-                    for (int i = 0; i < BLOCK_SIZE; ++i) {
-                        #pragma unroll
-                        __assume_aligned(A_block, 32);
-                        for (int j = 0; j < BLOCK_SIZE; ++j) {
-                            int a = A_block[j + i * n];
-                            
-                            __assume_aligned(B_block, 32);
-                            __assume_aligned(C_block, 32);
-                            #pragma unroll
-                            for (int k = 0; k < BLOCK_SIZE; ++k) {
-                                int result = B_block[k + j * n] + a;
-
-                                int c = C_block[k + i * n];
-                                int diff = result - c;
-                                int comparison = diff < 0;
-                                C_block[k + i * n] = c + diff * comparison;
-                                done = done & !comparison;
-                            }
-                        }
-                    }
-                }
-            }
-
-            #pragma omp barrier
-        }
-
-    }
-
     // Repeated squaring until nothing changes
+    int* restrict lnew = (int*) _mm_malloc(n*n*sizeof(int), 32);
+    memcpy(lnew, l, n*n * sizeof(int));
     for (int done = 0; !done; ) {
         done = square(n, l, lnew);
     }
-    free(lnew);
+    _mm_free(lnew);
     deinfinitize(n, l);
 }
 
@@ -182,13 +180,31 @@ void shortest_paths(int n, int* restrict l)
 
 int* gen_graph(int n, double p)
 {
-    int* l = (int *)_mm_malloc(n*n*sizeof(int), 32);
+    int* l = (int*) _mm_malloc(n*n*sizeof(int), 32);
     struct mt19937p state;
     sgenrand(10302011UL, &state);
     for (int j = 0; j < n; ++j) {
-        for (int i = 0; i < n; ++i)
+        for (int i = 0; i < n; ++i) {
             l[j*n+i] = (genrand(&state) < p);
+        }
         l[j*n+j] = 0;
+    }
+    return l;
+}
+
+int* gen_graph(int copySize, int n, double p)
+{
+    int* l = (int*) _mm_malloc(copySize*copySize*sizeof(int), 32);
+    struct mt19937p state;
+    sgenrand(10302011UL, &state);
+    for (int j = 0; j < copySize; ++j) {
+        for (int i = 0; i < copySize; ++i) {
+            if(i < n && j < n)
+                l[j*copySize+i] = (genrand(&state) < p);
+            else
+                l[j*copySize+i] = n+1;
+        }
+        l[j*copySize+j] = 0;
     }
     return l;
 }
@@ -255,6 +271,8 @@ int main(int argc, char** argv)
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
 
+    omp_set_num_threads(NUM_THREADS);
+
     // Option processing
     extern char* optarg;
     const char* optstring = "hn:d:p:o:i:";
@@ -271,14 +289,24 @@ int main(int argc, char** argv)
         }
     }
 
+    int nBlocks  = (int) ceil((float) n / (float) SQRT_THREADS / (float) BLOCK_SIZE);
+    int copySize = nBlocks * SQRT_THREADS * BLOCK_SIZE;
+
     // Graph generation + output
-    int* l = gen_graph(n, p);
+    int* lCopy = gen_graph(copySize, n, p);
+    int* l     = gen_graph(n, n, p);
     if (ifname)
         write_matrix(ifname,  n, l);
 
     // Time the shortest paths code
     double t0 = omp_get_wtime();
-    shortest_paths(n, l);
+    shortest_paths(n, lCopy);
+    int i, j;
+    for (j = 0; j < n; ++j) {
+        for (i = 0; i < n; ++i) {
+            l[j*n+i] = lCopy[j * copySize + i];
+        }
+    }
     double t1 = omp_get_wtime();
 
     printf("== OpenMP with %d threads\n", omp_get_max_threads());
@@ -292,6 +320,6 @@ int main(int argc, char** argv)
         write_matrix(ofname, n, l);
 
     // Clean up
-    free(l);
+    _mm_free(l);
     return 0;
 }
